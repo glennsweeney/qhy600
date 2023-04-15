@@ -1,0 +1,10 @@
+qhy_sdk
+
+.venv
+
+# Meson subprojects
+subprojects/**
+!subprojects/.clang-tidy
+!subprojects/*.wrap
+!subprojects/packagefiles
+!subprojects/packagefiles/**

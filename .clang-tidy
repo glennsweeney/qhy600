@@ -1,0 +1,24 @@
+# https://clang.llvm.org/extra/clang-tidy/checks/list.html
+Checks: >
+  *,
+  -abseil-*,
+  -altera-*,
+  -android-*,
+  -boost-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-exception-escape,
+  -fuchsia-*,
+  -google-objc-*,
+  -google-readability-todo,
+  -llvm-header-guard,
+  -llvmlibc-*,
+  -modernize-use-trailing-return-type,
+  -mpi-*,
+  -objc-*,
+  -readability-identifier-length,
+  -zircon
+CheckOptions:
+  - key:             readability-magic-numbers.IgnoredIntegerValues
+    value:           '1'
+# Add values separated by semicolons
+# TODO: bugprone-exception-escape should be enabled if it does not interfere with testing.
