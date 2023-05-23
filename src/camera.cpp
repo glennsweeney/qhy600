@@ -4,6 +4,7 @@
 #include "spdlog/spdlog.h"
 
 #include <chrono>
+#include <string>
 #include <thread>
 
 void checkControl(qhyccd_handle* handle, CONTROL_ID id, const std::string& controlName) {
@@ -109,7 +110,7 @@ void checkControls(qhyccd_handle* handle) {
 Camera::Camera(char* const cameraID) : _cameraID(cameraID) {
     QHYRet ret;
 
-    spdlog::trace("Constructing camera with ID {}.", _cameraID);
+    spdlog::debug("Constructing camera with ID {}.", _cameraID);
 
     _cameraHandle = OpenQHYCCD(cameraID);
     if (_cameraHandle == nullptr) {
@@ -136,22 +137,61 @@ Camera::Camera(char* const cameraID) : _cameraID(cameraID) {
     _framebuffer.resize(memLength);
 
 
-    SetQHYCCDBitsMode(_cameraHandle, 16);
-
-    SetQHYCCDResolution(_cameraHandle, 0, 0, 8000, 5000);
+    ret = SetQHYCCDBitsMode(_cameraHandle, 16);
+    if (ret != QHYCCD_SUCCESS) {
+        spdlog::error("Unable to set bits mode.");
+        throw std::runtime_error("Unable to set bits mode.");
+    }
 
     ret = IsQHYCCDCFWPlugged(_cameraHandle);
+    if (ret != QHYCCD_SUCCESS) {
+        spdlog::error("Unable to get filter wheel status.");
+        throw std::runtime_error("Unable to get filter wheel status.");
+    }
     spdlog::debug("Filter wheel attached: {}", ret == QHYCCD_SUCCESS ? "yes" : "no");
 }
 
 Camera::~Camera() {
-    spdlog::trace("Destructing camera with ID {}.", _cameraID);
+    spdlog::debug("Destructing camera with ID {}.", _cameraID);
     if (_cameraHandle != nullptr) {
         QHYRet ret = CloseQHYCCD(_cameraHandle);
         if (ret != QHYCCD_SUCCESS) {
             spdlog::error("Unable to close camera with ID {}.", _cameraID);
             // Welp.
         }
+    }
+}
+
+
+const std::string& Camera::cameraID() {
+    return _cameraID;
+}
+
+void Camera::setFilterWheelPosition(size_t position) {
+    spdlog::trace("start");
+    QHYRet ret;
+    if (IsQHYCCDCFWPlugged(_cameraHandle) != QHYCCD_SUCCESS) {
+        spdlog::error("Unable to contact filter wheel.");
+        return;
+    }
+
+    std::string order = std::to_string(position);
+    ret = SendOrder2QHYCCDCFW(_cameraHandle, const_cast<char*>(order.c_str()), order.size());
+    if (ret != QHYCCD_SUCCESS) {
+        spdlog::error("Unable to send order to filter wheel.");
+        throw std::runtime_error("Unable to send order to filter wheel.");
+    }
+
+    char buffer[4];
+    while (true) {
+        memset(buffer, 0, 4);
+        GetQHYCCDCFWStatus(_cameraHandle, buffer);
+        spdlog::trace("{}", buffer);
+        if (!strncmp(order.c_str(), buffer, order.size())) {
+
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
 }
 
@@ -226,4 +266,56 @@ void Camera::temperatureThing() {
         spdlog::debug("{}\t{}", temp, pwm);
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
+}
+
+void init() {
+
+    spdlog::debug("Initializing QHY SDK.");
+    SetQHYCCDLogLevel(0);
+
+    // Initialize the library
+    QHYRet ret = InitQHYCCDResource();
+    if (ret != QHYCCD_SUCCESS) {
+        spdlog::error("Failed to initialize QHY SDK.");
+        throw std::runtime_error("Failed to initialize QHY SDK.");
+    }
+}
+
+void deinit() {
+    spdlog::debug("Releasing QHY SDK.");
+    QHYRet ret = ReleaseQHYCCDResource();
+    if (ret != QHYCCD_SUCCESS) {
+        spdlog::error("Failed to release QHY SDK");
+        throw std::runtime_error("Failed to release QHY SDK");
+    }
+}
+
+std::vector<Camera> scanCameras() {
+
+    // TODO: QHY doesn't actually say how long a buffer is needed!
+    constexpr size_t QHY_ID_BUFFER_LEN = 256;
+
+    // Identify cameras
+    uint32_t cameraCount = ScanQHYCCD();
+    if (cameraCount == 0) {
+        spdlog::error("No cameras found.");
+        throw std::runtime_error("No cameras found.");
+    }
+    spdlog::info("Found {} camera(s).", cameraCount);
+
+    // Enumerate cameras
+    std::vector<Camera> cameras;
+    cameras.reserve(cameraCount);
+    std::array<char, QHY_ID_BUFFER_LEN> cameraID;
+    for (size_t i = 0; i < cameraCount; i++) {
+        QHYRet ret = GetQHYCCDId(i, cameraID.data());
+        if (ret != QHYCCD_SUCCESS) {
+            spdlog::error("Unable to get camera ID for index {}.", i);
+            throw std::runtime_error("Unable to get camera ID.");
+        }
+        spdlog::debug("Found camera with ID:{}", cameraID.data());
+        cameras.emplace_back(cameraID.data());
+    }
+
+    return cameras;
 }

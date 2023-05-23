@@ -47,12 +47,13 @@ test_sources = files(
     'test/test_qhy.cpp'
 )
 
-perf_sources = files(
-    'perf/perf_qhy.cpp'
+gui_includes = include_directories(
+    'gui'
 )
 
 gui_sources = files(
-    'gui/main.cpp'
+    'gui/main.cpp',
+    'gui/application.cpp'
 )
 
 
@@ -73,10 +74,6 @@ gtest_proj = subproject('gtest')
 gtest_dep = gtest_proj.get_variable('gtest_dep')
 gtest_main_dep = gtest_proj.get_variable('gtest_main_dep')
 
-benchmark_proj = subproject('benchmark')
-benchmark_dep = benchmark_proj.get_variable('google_benchmark_dep')
-benchmark_main_dep = benchmark_proj.get_variable('google_benchmark_main_dep')
-
 glfw_proj = subproject('glfw')
 glfw_dep = glfw_proj.get_variable('glfw_dep')
 
@@ -85,6 +82,7 @@ imgui_dep = imgui_proj.get_variable('imgui_dep')
 
 implot_proj = subproject('implot')
 implot_dep = implot_proj.get_variable('implot_dep')
+
 
 ###################
 ##### QHY SDK #####
@@ -95,6 +93,7 @@ libdir = meson.current_source_dir() + '/qhy_sdk/usr/local/lib/'
 message('HIHIHI')
 message(libdir)
 qhy_sdk_dep = cpp.find_library('qhyccd', dirs : libdir)
+
 
 #########################
 ##### Build Library #####
@@ -134,8 +133,6 @@ cli = executable(
 ##### Build Tests #####
 #######################
 
-
-
 unit_tests = executable(
     project_name + '_test',
     test_sources,
@@ -148,23 +145,6 @@ unit_tests = executable(
 test('Unit Tests', unit_tests)
 
 
-######################
-##### Build Perf #####
-######################
-
-
-
-perf_tests = executable(
-    project_name + '_perf',
-    perf_sources,
-    dependencies : [
-        benchmark_dep,
-        benchmark_main_dep,
-        qhy_dep
-    ]
-)
-
-
 #####################
 ##### Build GUI #####
 #####################=
@@ -172,10 +152,12 @@ perf_tests = executable(
 gui = executable(
     project_name + '_gui',
     gui_sources,
+    include_directories : gui_includes,
     dependencies : [
         glfw_dep,
         imgui_dep,
         implot_dep,
+        spdlog_dep,
         qhy_dep
     ]
 )
