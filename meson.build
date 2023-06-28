@@ -83,6 +83,9 @@ imgui_dep = imgui_proj.get_variable('imgui_dep')
 implot_proj = subproject('implot')
 implot_dep = implot_proj.get_variable('implot_dep')
 
+png_proj = subproject('png')
+png_dep = png_proj.get_variable('libpng_dep')
+
 
 ###################
 ##### QHY SDK #####
@@ -111,7 +114,8 @@ qhy = library(
 
 qhy_dep = declare_dependency(
     link_with: qhy,
-    include_directories : lib_includes
+    include_directories : lib_includes,
+    dependencies : [png_dep]
 )
 
 
@@ -139,6 +143,7 @@ unit_tests = executable(
     dependencies : [
         gtest_dep,
         gtest_main_dep,
+        spdlog_dep,
         qhy_dep
     ]
 )
@@ -149,15 +154,16 @@ test('Unit Tests', unit_tests)
 ##### Build GUI #####
 #####################=
 
-gui = executable(
-    project_name + '_gui',
-    gui_sources,
-    include_directories : gui_includes,
-    dependencies : [
-        glfw_dep,
-        imgui_dep,
-        implot_dep,
-        spdlog_dep,
-        qhy_dep
-    ]
-)
+# gui = executable(
+#     project_name + '_gui',
+#     gui_sources,
+#     include_directories : gui_includes,
+#     dependencies : [
+#         glfw_dep,
+#         imgui_dep,
+#         implot_dep,
+#         spdlog_dep,
+#         png_dep,
+#         qhy_dep
+#     ]
+# )

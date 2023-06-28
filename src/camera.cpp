@@ -4,8 +4,11 @@
 #include "spdlog/spdlog.h"
 
 #include <chrono>
+#include <cmath>
+#include <png.h>
 #include <string>
 #include <thread>
+
 
 void checkControl(qhyccd_handle* handle, CONTROL_ID id, const std::string& controlName) {
     QHYRet ret = IsQHYCCDControlAvailable(handle, id);
@@ -19,6 +22,7 @@ void checkControl(qhyccd_handle* handle, CONTROL_ID id, const std::string& contr
         spdlog::trace("\t{} [{}:{}:{}]", value, min, step, max);
     }
 }
+
 
 void checkControls(qhyccd_handle* handle) {
     checkControl(handle, CONTROL_BRIGHTNESS, "CONTROL_BRIGHTNESS");
@@ -106,36 +110,114 @@ void checkControls(qhyccd_handle* handle) {
     checkControl(handle, CONTROL_GlobalReset, "CONTROL_GlobalReset");
 }
 
+CameraStats getStats(qhyccd_handle* handle) {
+
+    CameraStats stats;
+
+    QHYRet ret;
+    // Log useful information
+    uint32_t numReadModes;
+    ret = GetQHYCCDNumberOfReadModes(handle, &numReadModes);
+    if (ret != QHYCCD_SUCCESS) {
+        spdlog::error("Unable to get read mode count.");
+        throw std::runtime_error("Unable to get read mode count.");
+    }
+    spdlog::trace("Read mode count: {}", numReadModes);
+    for (size_t i = 0; i < numReadModes; i++) {
+        std::array<char, 256> readModeName;
+        ret = GetQHYCCDReadModeName(handle, i, readModeName.data());
+        if (ret != QHYCCD_SUCCESS) {
+            spdlog::error("Unable to get read mode name.");
+            throw std::runtime_error("Unable to get read mode name.");
+        }
+        spdlog::trace("\tRead Mode: {}", std::string(readModeName.data()));
+        stats.readModes.push_back(std::string(readModeName.data()));
+    }
+
+    // Log useful information
+    ret = GetQHYCCDChipInfo(
+            handle,
+            &stats.sensorSize.first,
+            &stats.sensorSize.second,
+            &stats.sensorArea.sizeX,
+            &stats.sensorArea.sizeY,
+            &stats.pixelSize.first,
+            &stats.pixelSize.second,
+            &stats.nativeBits);
+    if (ret != QHYCCD_SUCCESS) {
+        spdlog::error("Unable to get chip info.");
+        throw std::runtime_error("Unable to get chip info.");
+    }
+    stats.sensorArea.startX = 0;
+    stats.sensorArea.startY = 0;
+
+    ret = GetQHYCCDEffectiveArea(
+            handle,
+            &stats.effectiveArea.startX,
+            &stats.effectiveArea.startY,
+            &stats.effectiveArea.sizeX,
+            &stats.effectiveArea.sizeY);
+    if (ret != QHYCCD_SUCCESS) {
+        spdlog::error("Unable to get chip info.");
+        throw std::runtime_error("Unable to get chip info.");
+    }
+
+    ret = GetQHYCCDOverScanArea(
+            handle,
+            &stats.overscanArea.startX,
+            &stats.overscanArea.startY,
+            &stats.overscanArea.sizeX,
+            &stats.overscanArea.sizeY);
+    if (ret != QHYCCD_SUCCESS) {
+        spdlog::error("Unable to get chip info.");
+        throw std::runtime_error("Unable to get chip info.");
+    }
+
+    spdlog::trace("Sensor area: {}", stats.sensorArea);
+    spdlog::trace("Effective area: {}", stats.effectiveArea);
+    spdlog::trace("Overscan area: {}", stats.overscanArea);
+    spdlog::trace("Sensor Size: {}x{}", stats.sensorSize.first, stats.sensorSize.second);
+    spdlog::trace("Pixel Size: {}x{}", stats.pixelSize.first, stats.pixelSize.second);
+
+    return stats;
+}
+
 
 Camera::Camera(char* const cameraID) : _cameraID(cameraID) {
     QHYRet ret;
 
-    spdlog::debug("Constructing camera with ID {}.", _cameraID);
+    spdlog::debug("Starting Constructing camera with ID: {}.", _cameraID);
 
     _cameraHandle = OpenQHYCCD(cameraID);
     if (_cameraHandle == nullptr) {
-        spdlog::error("Unable to open camera with ID {}.", _cameraID);
+        spdlog::error("Unable to open camera with ID: {}.", _cameraID);
         throw std::runtime_error("Unable to open camera.");
     }
 
-    ret = InitQHYCCD(_cameraHandle);
+    // Log useful information
+    checkControls(_cameraHandle);
+    _stats = getStats(_cameraHandle);
+
+    // Read mode MUST be set before init
+    ret = SetQHYCCDReadMode(_cameraHandle, 0);  // Photographic mode (for now)
     if (ret != QHYCCD_SUCCESS) {
-        spdlog::error("Unable to initialize camera with ID {}.", _cameraID);
-        throw std::runtime_error("Unable to initialize camera.");
+        spdlog::error("Unable to set read mode.");
+        throw std::runtime_error("Unable to set read mode.");
     }
 
-    checkControls(_cameraHandle);
-
-    ret = SetQHYCCDStreamMode(_cameraHandle, 0x00);  // 0x00 is single, 0x01 is live)
+    // Stream mode MUST be set before init
+    ret = SetQHYCCDStreamMode(_cameraHandle, 0x01);  // 0x00 is single, 0x01 is live)
     if (ret != QHYCCD_SUCCESS) {
         spdlog::error("Unable to set streaming mode.");
         throw std::runtime_error("Unable to set streaming mode.");
     }
 
-    uint32_t memLength = GetQHYCCDMemLength(_cameraHandle);
-    spdlog::debug("Memory length: {}", memLength);
-    _framebuffer.resize(memLength);
-
+    // Now we can init
+    ret = InitQHYCCD(_cameraHandle);
+    if (ret != QHYCCD_SUCCESS) {
+        spdlog::error("Unable to initialize camera with ID: {}.", _cameraID);
+        throw std::runtime_error("Unable to initialize camera.");
+    }
 
     ret = SetQHYCCDBitsMode(_cameraHandle, 16);
     if (ret != QHYCCD_SUCCESS) {
@@ -143,71 +225,279 @@ Camera::Camera(char* const cameraID) : _cameraID(cameraID) {
         throw std::runtime_error("Unable to set bits mode.");
     }
 
-    ret = IsQHYCCDCFWPlugged(_cameraHandle);
+    // Initialize ROI to the full sensor
+    setRoi(_stats.sensorArea);
+    // setRoi({0, 0, 100, 100});
+
+    _memLength = GetQHYCCDMemLength(_cameraHandle);
+    spdlog::trace("Memory length: {}", _memLength);
+    _framebuffer.resize(_memLength);
+
+    ret = BeginQHYCCDLive(_cameraHandle);
     if (ret != QHYCCD_SUCCESS) {
-        spdlog::error("Unable to get filter wheel status.");
-        throw std::runtime_error("Unable to get filter wheel status.");
+        spdlog::error("Unable to begin live stream.");
+        throw std::runtime_error("Unable to begin live stream.");
     }
-    spdlog::debug("Filter wheel attached: {}", ret == QHYCCD_SUCCESS ? "yes" : "no");
+    spdlog::debug("Live mode enabled.");
+
+    // TEST
+    uint32_t liveWidth = 0;
+    uint32_t liveHeight = 0;
+    uint32_t liveBpp = 0;
+    uint32_t liveChannels = 0;
+    while (true) {
+        bool gotFrame = false;
+        spdlog::debug("Start Frame Acquire");
+        while (true) {
+            ret = GetQHYCCDLiveFrame(
+                    _cameraHandle,
+                    &liveWidth,
+                    &liveHeight,
+                    &liveBpp,
+                    &liveChannels,
+                    _framebuffer.data());
+            if (ret == QHYCCD_SUCCESS) {
+                gotFrame = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        spdlog::debug("End Frame Acquire");
+        spdlog::debug("{} {} {} {}", liveWidth, liveHeight, liveBpp, liveChannels);
+    }
+    // TEST
+
+    _startStream();
+
+    spdlog::debug("Finished Constructing camera with ID: {}.", _cameraID);
 }
+
 
 Camera::~Camera() {
-    spdlog::debug("Destructing camera with ID {}.", _cameraID);
     if (_cameraHandle != nullptr) {
-        QHYRet ret = CloseQHYCCD(_cameraHandle);
+        spdlog::debug("Starting Destructing camera with ID: {}.", _cameraID);
+
+        _shouldStream = false;
+        if (_frameStreamThread.joinable()) {
+            _frameStreamThread.join();
+        }
+
+        QHYRet ret = StopQHYCCDLive(_cameraHandle);
         if (ret != QHYCCD_SUCCESS) {
-            spdlog::error("Unable to close camera with ID {}.", _cameraID);
+            spdlog::error("Unable to stop live stream.");
             // Welp.
         }
+        spdlog::debug("Live mode disabled.");
+
+        _filterMoving = false;
+        if (_filterMovingThread.joinable()) {
+            _filterMovingThread.join();
+        }
+        _temperatureControlActive = false;
+        if (_temperatureControlThread.joinable()) {
+            _temperatureControlThread.join();
+        }
+
+        ret = CloseQHYCCD(_cameraHandle);
+        if (ret != QHYCCD_SUCCESS) {
+            spdlog::error("Unable to close camera with ID: {}.", _cameraID);
+            // Welp.
+        }
+        spdlog::debug("Finished Destructing camera with ID: {}.", _cameraID);
     }
 }
 
 
-const std::string& Camera::cameraID() {
-    return _cameraID;
+void Camera::setGain(size_t gain) {
+    _gain = static_cast<double>(gain);
+    spdlog::debug("Setting gain to {}", _gain);
+
+    // TODO bounds check
+    QHYRet ret = SetQHYCCDParam(_cameraHandle, CONTROL_GAIN, _gain);
+    if (ret != QHYCCD_SUCCESS) {
+        spdlog::error("Unable to set gain to {}.", _gain);
+        throw std::runtime_error("Unable to set gain.");
+    }
 }
 
+
+void Camera::setOffset(size_t offset) {
+    _offset = static_cast<double>(offset);
+    spdlog::debug("Setting offset to {}", _offset);
+
+    // TODO bounds check
+    QHYRet ret = SetQHYCCDParam(_cameraHandle, CONTROL_OFFSET, _offset);
+    if (ret != QHYCCD_SUCCESS) {
+        spdlog::error("Unable to set offset to {}.", _offset);
+        throw std::runtime_error("Unable to set offset.");
+    }
+}
+
+
+void Camera::setExposure(size_t exposure) {
+    _exposure = static_cast<double>(exposure);
+    spdlog::debug("Setting exposure to {}", _exposure);
+
+    // TODO bounds check
+    QHYRet ret = SetQHYCCDParam(_cameraHandle, CONTROL_EXPOSURE, _exposure);
+    if (ret != QHYCCD_SUCCESS) {
+        spdlog::error("Unable to set exposure to {}.", _exposure);
+        throw std::runtime_error("Unable to set exposure.");
+    }
+}
+
+void Camera::setBinMode(BinMode mode) {
+    _binMode = mode;
+
+    uint32_t bin = 0;
+    switch (_binMode) {
+    case BinMode::BIN_1x1:
+        bin = 1;
+        break;
+    case BinMode::BIN_2x2:
+        bin = 2;
+        break;
+    case BinMode::BIN_3x3:
+        bin = 3;
+        break;
+    case BinMode::BIN_4x4:
+        bin = 4;
+        break;
+    default:
+        throw std::runtime_error("Unknown binning mode.");
+        break;
+    }
+    QHYRet ret = SetQHYCCDBinMode(_cameraHandle, bin, bin);
+    if (ret != QHYCCD_SUCCESS) {
+        spdlog::error("Unable to set bin mode to {}x{}.", bin, bin);
+        throw std::runtime_error("Unable to set bin mode.");
+    }
+}
+
+
+void Camera::setRoi(const Roi& roi) {
+    QHYRet ret = SetQHYCCDResolution(_cameraHandle, roi.startX, roi.startY, roi.sizeX, roi.sizeY);
+    if (ret != QHYCCD_SUCCESS) {
+        spdlog::error("Unable to set resolution: {}.", roi);
+        throw std::runtime_error("Unable to set resolution.");
+    }
+    _roi = roi;
+}
+
+
 void Camera::setFilterWheelPosition(size_t position) {
-    spdlog::trace("start");
-    QHYRet ret;
-    if (IsQHYCCDCFWPlugged(_cameraHandle) != QHYCCD_SUCCESS) {
-        spdlog::error("Unable to contact filter wheel.");
+    if (_filterMoving) {
+        spdlog::warn("Filter wheel already in motion; ignoring new position.");
         return;
     }
 
+    // Clear out a previous thread, if existing
+    if (_filterMovingThread.joinable()) {
+        _filterMovingThread.join();
+    }
+
+    // Check that the wheel is there
+    if (IsQHYCCDCFWPlugged(_cameraHandle) != QHYCCD_SUCCESS) {
+        spdlog::error("Unable to contact filter wheel.");
+        throw std::runtime_error("Unable to contact filter wheel.");
+    }
+
+    _filterMoving = true;
+    _filterPosition = position;
+    spdlog::debug("Setting filter wheel to position {}", _filterPosition);
+
     std::string order = std::to_string(position);
-    ret = SendOrder2QHYCCDCFW(_cameraHandle, const_cast<char*>(order.c_str()), order.size());
+    QHYRet ret = SendOrder2QHYCCDCFW(_cameraHandle, const_cast<char*>(order.c_str()), order.size());
     if (ret != QHYCCD_SUCCESS) {
         spdlog::error("Unable to send order to filter wheel.");
         throw std::runtime_error("Unable to send order to filter wheel.");
     }
 
-    char buffer[4];
-    while (true) {
-        memset(buffer, 0, 4);
-        GetQHYCCDCFWStatus(_cameraHandle, buffer);
-        spdlog::trace("{}", buffer);
-        if (!strncmp(order.c_str(), buffer, order.size())) {
-
-            break;
+    _filterMovingThread = std::thread([&, order]() {
+        char buffer[4];
+        while (true) {
+            memset(buffer, 0, 4);
+            GetQHYCCDCFWStatus(_cameraHandle, buffer);
+            spdlog::trace("filter wheel: (current: {}, target:{})", buffer, order);
+            if (!strncmp(order.c_str(), buffer, order.size())) {
+                break;
+            }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        spdlog::debug("Filter wheel move complete: {}", _filterPosition);
+        _filterMoving = false;
+    });
+}
+
+
+void Camera::waitFilterWheel() {
+    while (_filterMoving) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 }
 
-void Camera::setExposureUs(size_t us) {
-    QHYRet ret;
 
-    // TODO bounds check
-    ret = SetQHYCCDParam(_cameraHandle, CONTROL_EXPOSURE, (double)us);
+void Camera::startTemperatureControl(double targetTemperature) {
+    _targetTemperature = targetTemperature;
+    spdlog::debug("Starting temperature control: {}", _targetTemperature);
+
+    stopTemperatureControl();
+    _temperatureControlActive = true;
+
+    _temperatureControlThread = std::thread([&]() {
+        while (_temperatureControlActive) {
+            ControlQHYCCDTemp(_cameraHandle, _targetTemperature);
+            std::this_thread::sleep_for(std::chrono::milliseconds(900));
+        }
+    });
+}
+
+
+void Camera::stopTemperatureControl() {
+    _temperatureControlActive = false;
+    if (_temperatureControlThread.joinable()) {
+        _temperatureControlThread.join();
+    }
+}
+
+
+bool Camera::isTemperatureStabilized(double threshold) {
+    double currentTemperature = GetQHYCCDParam(_cameraHandle, CONTROL_CURTEMP);
+    if (std::abs(currentTemperature - _targetTemperature) <= threshold) {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+
+const std::string& Camera::getCameraID() {
+    return _cameraID;
+}
+
+
+double Camera::getTemperature() {
+    double temperature = GetQHYCCDParam(_cameraHandle, CONTROL_CURTEMP);
+    return temperature;
+}
+
+double Camera::getTecPwm() {
+    double pwm = GetQHYCCDParam(_cameraHandle, CONTROL_CURPWM);
+    return pwm;
+}
+
+Roi Camera::getRoi() {
+    Roi roi;
+    QHYRet ret =
+            GetQHYCCDCurrentROI(_cameraHandle, &roi.startX, &roi.startY, &roi.sizeX, &roi.sizeY);
     if (ret != QHYCCD_SUCCESS) {
-        spdlog::error("Unable to set exposure to {}.", us);
-        throw std::runtime_error("Unable to set exposure.");
+        spdlog::error("Unable to get current ROI.");
+        throw std::runtime_error("Unable to get current ROI.");
     }
+    return roi;
 }
 
 
-void Camera::doThing() {
+void Camera::exposeSingle() {
     QHYRet ret;
 
     spdlog::trace("Start exposure.");
@@ -215,6 +505,9 @@ void Camera::doThing() {
     if (ret != QHYCCD_SUCCESS) {
         spdlog::error("Unable to start exposure.");
     }
+
+    uint32_t remainingTEMP = GetQHYCCDExposureRemaining(_cameraHandle);
+    spdlog::trace("Remaining:{}", remainingTEMP);
 
     uint32_t width;
     uint32_t height;
@@ -229,93 +522,129 @@ void Camera::doThing() {
 }
 
 
-void Camera::doOtherThing() {
+void Camera::writeBuffer(const std::string& filepath) {
 
-    SetQHYCCDStreamMode(_cameraHandle, 0x01);
-    BeginQHYCCDLive(_cameraHandle);
-    uint32_t width;
-    uint32_t height;
-    uint32_t bpp;
-    uint32_t channels;
+    const int color_type = PNG_COLOR_TYPE_GRAY;
 
-    for (size_t i = 0; i < 20; i++) {
-        spdlog::trace("{}, {}", (void*)_framebuffer.data(), _framebuffer.size());
-
-        GetQHYCCDLiveFrame(_cameraHandle, &width, &height, &bpp, &channels, _framebuffer.data());
+    // Open the file for writing
+    FILE* fp = fopen(filepath.c_str(), "wb");
+    if (!fp) {
+        spdlog::error("Failed to open file {}", filepath);
+        return;
     }
 
-    StopQHYCCDLive(_cameraHandle);
+    // Create the PNG write struct
+    png_structp png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+    if (!png_ptr) {
+        spdlog::error("Failed to create PNG write struct.");
+        fclose(fp);
+        return;
+    }
+
+    // Create the PNG info struct
+    png_infop info_ptr = png_create_info_struct(png_ptr);
+    if (!info_ptr) {
+        spdlog::error("Failed to create PNG info struct.");
+        png_destroy_write_struct(&png_ptr, NULL);
+        fclose(fp);
+        return;
+    }
+
+    // Set error handling
+    if (setjmp(png_jmpbuf(png_ptr))) {
+        spdlog::error("An error occurred while writing the PNG file.");
+        png_destroy_write_struct(&png_ptr, &info_ptr);
+        fclose(fp);
+        return;
+    }
+
+    // Set up the PNG write
+    png_init_io(png_ptr, fp);
+    png_set_IHDR(
+            png_ptr,
+            info_ptr,
+            _roi.sizeX,
+            _roi.sizeY,
+            16,
+            color_type,
+            PNG_INTERLACE_NONE,
+            PNG_COMPRESSION_TYPE_DEFAULT,
+            PNG_FILTER_TYPE_DEFAULT);
+
+    // Write the PNG header
+    png_write_info(png_ptr, info_ptr);
+
+
+    std::vector<uint8_t> data;
+    data.resize(2 * _roi.sizeX * _roi.sizeY);
+    for (size_t i = 0; i < _roi.sizeX * _roi.sizeY; i++) {
+        uint16_t value = (static_cast<uint16_t>(_framebuffer[2 * i]) << 0)
+                         | (static_cast<uint16_t>(_framebuffer[2 * i + 1]) << 8);
+        float valueF = static_cast<float>(value) / 65535;
+        valueF = std::sqrt(valueF);
+        value = static_cast<uint16_t>(valueF * 65535);
+        data[2 * i + 1] = (value & 0x00ff);
+        data[2 * i] = (value & 0xff00) >> 8;
+    }
+
+    for (size_t y = 0; y < _roi.sizeY; y++) {
+        png_bytep row = reinterpret_cast<png_bytep>(data.data() + y * (2 * _roi.sizeX));
+        png_write_row(png_ptr, row);
+    }
+
+    // End the PNG write
+    png_write_end(png_ptr, info_ptr);
+
+    png_destroy_write_struct(&png_ptr, &info_ptr);
+    fclose(fp);
+
+    spdlog::trace("PNG written.");
 }
 
-void Camera::temperatureThing() {
+void Camera::thingy() {
 
-    // SetQHYCCDParam(_cameraHandle, CONTROL_MANULPWM, 255);
-
+    uint32_t width = _roi.sizeX;
+    uint32_t height = _roi.sizeY;
+    uint32_t bpp = 16;
+    uint32_t channels = 1;
     while (true) {
-        ControlQHYCCDTemp(_cameraHandle, 0.0);
-        double pwm = GetQHYCCDParam(_cameraHandle, CONTROL_CURPWM);
-        double temp = GetQHYCCDParam(_cameraHandle, CONTROL_CURTEMP);
-        spdlog::debug("{}\t{}", temp, pwm);
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    }
-
-    while (true) {
-
-        double pwm = GetQHYCCDParam(_cameraHandle, CONTROL_CURPWM);
-        double temp = GetQHYCCDParam(_cameraHandle, CONTROL_CURTEMP);
-        spdlog::debug("{}\t{}", temp, pwm);
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    }
-}
-
-void init() {
-
-    spdlog::debug("Initializing QHY SDK.");
-    SetQHYCCDLogLevel(0);
-
-    // Initialize the library
-    QHYRet ret = InitQHYCCDResource();
-    if (ret != QHYCCD_SUCCESS) {
-        spdlog::error("Failed to initialize QHY SDK.");
-        throw std::runtime_error("Failed to initialize QHY SDK.");
-    }
-}
-
-void deinit() {
-    spdlog::debug("Releasing QHY SDK.");
-    QHYRet ret = ReleaseQHYCCDResource();
-    if (ret != QHYCCD_SUCCESS) {
-        spdlog::error("Failed to release QHY SDK");
-        throw std::runtime_error("Failed to release QHY SDK");
-    }
-}
-
-std::vector<Camera> scanCameras() {
-
-    // TODO: QHY doesn't actually say how long a buffer is needed!
-    constexpr size_t QHY_ID_BUFFER_LEN = 256;
-
-    // Identify cameras
-    uint32_t cameraCount = ScanQHYCCD();
-    if (cameraCount == 0) {
-        spdlog::error("No cameras found.");
-        throw std::runtime_error("No cameras found.");
-    }
-    spdlog::info("Found {} camera(s).", cameraCount);
-
-    // Enumerate cameras
-    std::vector<Camera> cameras;
-    cameras.reserve(cameraCount);
-    std::array<char, QHY_ID_BUFFER_LEN> cameraID;
-    for (size_t i = 0; i < cameraCount; i++) {
-        QHYRet ret = GetQHYCCDId(i, cameraID.data());
+        QHYRet ret = GetQHYCCDLiveFrame(
+                _cameraHandle, &width, &height, &bpp, &channels, _framebuffer.data());
         if (ret != QHYCCD_SUCCESS) {
-            spdlog::error("Unable to get camera ID for index {}.", i);
-            throw std::runtime_error("Unable to get camera ID.");
+            spdlog::error("Unable to get live frame: error {}.", ret);
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            //  throw std::runtime_error("Unable to get live frame.");
         }
-        spdlog::debug("Found camera with ID:{}", cameraID.data());
-        cameras.emplace_back(cameraID.data());
+        spdlog::trace("frame: {} {} {} {}", width, height, bpp, channels);
     }
+}
 
-    return cameras;
+
+void Camera::registerFrameCallback(FrameCallback callback) {
+    _frameCallback = callback;
+}
+
+
+void Camera::_startStream() {
+
+    _frameStreamThread = std::thread([&]() {
+        uint32_t width;
+        uint32_t height;
+        uint32_t bpp;
+        uint32_t channels;
+        std::vector<uint8_t> framebuffer;
+        framebuffer.resize(_memLength);
+        while (_shouldStream) {
+            QHYRet ret = GetQHYCCDLiveFrame(
+                    _cameraHandle, &width, &height, &bpp, &channels, framebuffer.data());
+            if (ret == QHYCCD_SUCCESS) {
+                spdlog::trace("Got frame: {} {} {} {}", width, height, bpp, channels);
+                if (_frameCallback != nullptr) {
+                    _frameCallback({});  // TODO: Make frame
+                }
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        }
+    });
 }

@@ -55,18 +55,46 @@ Application::Application() {
     spdlog::debug("ImGui initialized.");
 
     // Setup QHYCCD
-    init();
-
     _cameraScanThread = std::thread([&]() {
+        init();
         spdlog::debug("Beginning camera scan.");
         _cameras = scanCameras();
         spdlog::debug("Finished camera scan.");
+        if (_cameras.size() > 0) {
+            _cameraIndex = 0;
+        } else {
+            spdlog::warn("No camera found; UI remaining inactive.");
+            _cameraIndex = -1;
+            return;
+        }
+
+        _cameras[_cameraIndex].setGain(_gain);
+        _cameras[_cameraIndex].setOffset(_offset);
+        _cameras[_cameraIndex].setExposure(_exposure);
+    });
+
+    // Temperature monitor
+    _temperatureAdjustThread = std::thread([&]() {
+        while (!_shouldClose) {
+            if (_cameraIndex < 0) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                continue;
+            }
+            _cameras[_cameraIndex].controlTemperature(_targetTemperature);
+            _currentTemperature = _cameras[_cameraIndex].getTemperature();
+            _currentTecPwm = _cameras[_cameraIndex].getTecPwm();
+            spdlog::trace("Temperature: {}/{}", _currentTemperature, _currentTecPwm);
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
     });
 }
 
 Application::~Application() {
+    _shouldClose = true;
     _cameraScanThread.join();
     _cameras.clear();
+
+    // If we made it here, we know we called init().
     deinit();
 
     // Cleanup
@@ -108,6 +136,7 @@ void Application::run() {
             ImPlot::ShowDemoWindow(&_showImplotDemoWindow);
 
         _drawMainWindow();
+        _drawTemperatureWindow();
 
         // Rendering
         ImGui::Render();
@@ -138,5 +167,117 @@ void Application::_drawMainWindow() {
     }
 
     ImGui::Text("Hello, world!");
+
+    ImGui::Text("Camera ID: ");
+
+    // Early exit if there's no active camera
+    if (_cameraIndex < 0) {
+        ImGui::End();
+        return;
+    }
+
+    ImGui::SameLine();
+    ImGui::Text("%s", _cameras[_cameraIndex].getCameraID().c_str());
+
+    int gainInt = _gain;
+    if (ImGui::SliderInt("Gain", &gainInt, 0, 200, "%d", ImGuiSliderFlags_AlwaysClamp)) {
+        _gain = gainInt;
+        spdlog::trace("Update Gain: {}", _gain);
+        _cameras[_cameraIndex].setGain(_gain);
+    }
+    int offsetInt = _offset;
+    if (ImGui::SliderInt("Offset", &offsetInt, 0, 255, "%d", ImGuiSliderFlags_AlwaysClamp)) {
+        _offset = offsetInt;
+        spdlog::trace("Update Offset: {}", _offset);
+        _cameras[_cameraIndex].setOffset(_offset);
+    }
+    float exposureFloat = _exposure / 1e6f;
+    if (ImGui::DragFloat(
+                "Exposure Time",
+                &exposureFloat,
+                4.0,
+                0.0,
+                3600,
+                "%0.4f",
+                ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_Logarithmic)) {
+        _exposure = exposureFloat * 1e6f;
+        spdlog::trace("Update Exposure: {} ({})", exposureFloat, _exposure);
+        _cameras[_cameraIndex].setExposure(_exposure);
+    }
+
+    if (ImGui::Button("C")) {
+        _cameras[_cameraIndex].setFilterWheelPosition(0);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("R")) {
+        _cameras[_cameraIndex].setFilterWheelPosition(1);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("G")) {
+        _cameras[_cameraIndex].setFilterWheelPosition(2);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("B")) {
+        _cameras[_cameraIndex].setFilterWheelPosition(3);
+    }
+
+    if (ImGui::Button("Capture")) {
+        _cameras[_cameraIndex].exposeSingle();
+        _cameras[_cameraIndex].writeBuffer("test.png");
+    }
+
+    if (ImGui::Button("StartLive")) {
+        _cameras[_cameraIndex].startLive();
+        // std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+        // _liveViewLive = true;
+        // _liveViewThread = std::thread([&]() {
+        //     while (_liveViewLive) {
+        //         _cameras[_cameraIndex].thingy();
+        //     }
+        // });
+    }
+    if (ImGui::Button("LiveCapture")) {
+        _cameras[_cameraIndex].thingy();
+    }
+    if (ImGui::Button("EndLive")) {
+        _cameras[_cameraIndex].endLive();
+        _liveViewLive = true;
+    }
+
+    ImGui::End();
+}
+
+void Application::_drawTemperatureWindow() {
+    if (!_showTemperatureWindow) {
+        return;
+    }
+
+    if (!ImGui::Begin("Temperature Window", &_showTemperatureWindow)) {
+        ImGui::End();
+        return;
+    }
+
+    ImGui::Text("Temperature!");
+
+    // Early exit if there's no active camera
+    if (_cameraIndex < 0) {
+        ImGui::End();
+        return;
+    }
+
+    ImGui::Text("Current Temperature: ");
+    ImGui::SameLine();
+    ImGui::Text("%2.1f", _currentTemperature.load());
+
+    ImGui::Text("Current PWM: ");
+    ImGui::SameLine();
+    ImGui::Text("%3.0f", _currentTecPwm.load());
+
+
+    float targetTemp = _targetTemperature;
+    ImGui::SliderFloat(
+            "Target Temperature", &targetTemp, -40.0f, 40.0f, "%.1f", ImGuiSliderFlags_AlwaysClamp);
+    _targetTemperature = static_cast<double>(targetTemp);
+
     ImGui::End();
 }

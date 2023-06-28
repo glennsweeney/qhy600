@@ -40,3 +40,16 @@
     Note: if you want a release build, replace setup with `CC=clang CXX=clang++ meson setup --reconfigure -Ddebug=false -Db_ndebug=true -Db_lto=true -Doptimization=3 build .`
 
     Note: Other sanitizers are available, including `thread`, `memory`, and `leak`, but cannot be specificed simultaneously with `address,undefined`
+
+
+# Current libusb issue:
+
+Streaming works well for a while, then (with LIBUSB_DEBUG=1):
+```
+libusb: error [udev_hotplug_event] ignoring udev action bind
+```
+
+Trying to run again shows:
+```
+libusb: error [submit_bulk_transfer] submiturb failed error -1 errno=2
+```
